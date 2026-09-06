@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { db } from "@cap/database";
 import { mediaProcessingBudgets } from "@cap/database/schema";
-import { asc, inArray, sql } from "drizzle-orm";
+import { asc, inArray, lt, sql } from "drizzle-orm";
 
 const GiB = 1024 ** 3;
 const MiB = 1024 ** 2;
@@ -65,7 +65,12 @@ export async function reserveMediaProcessingBudget(input: {
 		await tx
 			.insert(mediaProcessingBudgets)
 			.values(limits.map((limit) => ({ ...limit, expiresAt })))
-			.onDuplicateKeyUpdate({ set: { id: sql`${mediaProcessingBudgets.id}` } });
+			.onDuplicateKeyUpdate({
+				set: {
+					id: sql`${mediaProcessingBudgets.id}`,
+					expiresAt: sql`GREATEST(${mediaProcessingBudgets.expiresAt}, ${expiresAt})`,
+				},
+			});
 		const locked = await tx
 			.select()
 			.from(mediaProcessingBudgets)
@@ -109,4 +114,12 @@ export async function reserveMediaProcessingBudget(input: {
 
 		return attemptBytes;
 	});
+}
+
+export async function cleanupExpiredMediaProcessingBudgets(now = new Date()) {
+	const result = await db()
+		.delete(mediaProcessingBudgets)
+		.where(lt(mediaProcessingBudgets.expiresAt, now))
+		.limit(1_000);
+	return result[0].affectedRows;
 }
