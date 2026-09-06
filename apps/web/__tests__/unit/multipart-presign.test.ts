@@ -73,6 +73,13 @@ describe("multipart presign ownership failures", () => {
 		expect(mocks.storage).not.toHaveBeenCalled();
 	});
 
+	it("does not reveal or sign a recording owned by someone else", async () => {
+		mocks.getOwnedById.mockReturnValue(Effect.fail({ _tag: "PolicyDenied" }));
+		const response = await request();
+		expect(response.status).toBe(404);
+		expect(mocks.storage).not.toHaveBeenCalled();
+	});
+
 	it("still signs a part for its owner", async () => {
 		mocks.getOwnedById.mockReturnValue(
 			Effect.succeed(Option.some([{ id: "missing-video" }])),

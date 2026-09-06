@@ -249,6 +249,9 @@ app.post(
 					Effect.catchTag("VideoNotFoundError", () =>
 						Effect.succeed(c.json({ error: "Video not found" }, 404)),
 					),
+					Effect.catchTag("PolicyDenied", () =>
+						Effect.succeed(c.json({ error: "Video not found" }, 404)),
+					),
 					Effect.provide(makeCurrentUserLayer(user)),
 					provideOptionalAuth,
 					runPromiseAnyEnv,
