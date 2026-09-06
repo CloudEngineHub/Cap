@@ -16,7 +16,7 @@ async function checkCrabNebulaDownload(
 			},
 		});
 
-		await res.body?.cancel();
+		await res.body?.cancel().catch(() => {});
 		if (res.status >= 200 && res.status < 300) {
 			return { ok: true, finalUrl: res.url };
 		}

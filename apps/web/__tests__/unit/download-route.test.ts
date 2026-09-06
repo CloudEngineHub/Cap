@@ -17,7 +17,7 @@ describe("desktop download route", () => {
 	});
 
 	it("redirects to the resolved download and cancels its probe body", async () => {
-		const cancel = vi.fn();
+		const cancel = vi.fn().mockResolvedValue(undefined);
 		vi.stubGlobal(
 			"fetch",
 			vi.fn().mockResolvedValue({
@@ -45,6 +45,25 @@ describe("desktop download route", () => {
 			params: Promise.resolve({ platform: "apple-silicon" }),
 		});
 		expect(response.headers.get("location")).toBe("https://github.com/cap.dmg");
+		vi.unstubAllGlobals();
+	});
+	it("preserves a successful redirect when probe cancellation fails", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn().mockResolvedValue({
+				status: 206,
+				url: "https://downloads.example/cap.dmg",
+				body: {
+					cancel: vi.fn().mockRejectedValue(new Error("Already closed")),
+				},
+			}),
+		);
+		const response = await GET(request, {
+			params: Promise.resolve({ platform: "apple-silicon" }),
+		});
+		expect(response.headers.get("location")).toBe(
+			"https://downloads.example/cap.dmg",
+		);
 		vi.unstubAllGlobals();
 	});
 });
