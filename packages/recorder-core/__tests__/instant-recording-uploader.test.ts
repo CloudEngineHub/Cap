@@ -929,9 +929,12 @@ describe("InstantRecordingUploader", () => {
 	it("stops retrying a part when its recording no longer exists", async () => {
 		const fetchMock = vi.fn(
 			async () =>
-				new Response(JSON.stringify({ error: "Video not found" }), {
-					status: 404,
-				}),
+				new Response(
+					JSON.stringify({ error: "Video not found", code: "VIDEO_NOT_FOUND" }),
+					{
+						status: 404,
+					},
+				),
 		);
 		vi.stubGlobal("fetch", fetchMock);
 		const uploader = new InstantRecordingUploader({
@@ -954,5 +957,24 @@ describe("InstantRecordingUploader", () => {
 				subpath: "raw-upload.webm",
 			}),
 		).rejects.toThrow("404");
+	});
+	it("retains retries for an unrelated presign 404", async () => {
+		const fetchMock = vi.fn(
+			async () => new Response("Not found", { status: 404 }),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const uploader = new InstantRecordingUploader({
+			videoId,
+			uploadId: "upload-123",
+			mimeType: "video/webm",
+			subpath: "raw-upload.webm",
+			setUploadStatus: vi.fn(),
+			sendProgressUpdate: vi.fn().mockResolvedValue(undefined),
+		});
+		const chunk = makeBlob(STREAMED_PART_BYTES, "video/webm");
+		uploader.handleChunk(chunk, chunk.size);
+		await new Promise((resolve) => setTimeout(resolve, 600));
+		expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+		await uploader.cancel();
 	});
 });

@@ -69,7 +69,10 @@ describe("multipart presign ownership failures", () => {
 		mocks.getOwnedById.mockReturnValue(Effect.succeed(Option.none()));
 		const response = await request();
 		expect(response.status).toBe(404);
-		expect(await response.json()).toEqual({ error: "Video not found" });
+		expect(await response.json()).toEqual({
+			error: "Video not found",
+			code: "VIDEO_NOT_FOUND",
+		});
 		expect(mocks.storage).not.toHaveBeenCalled();
 	});
 

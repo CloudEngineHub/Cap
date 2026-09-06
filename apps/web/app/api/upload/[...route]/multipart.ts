@@ -247,10 +247,20 @@ app.post(
 					return { presignedUrl, provider: bucket.provider };
 				}).pipe(
 					Effect.catchTag("VideoNotFoundError", () =>
-						Effect.succeed(c.json({ error: "Video not found" }, 404)),
+						Effect.succeed(
+							c.json(
+								{ error: "Video not found", code: "VIDEO_NOT_FOUND" },
+								404,
+							),
+						),
 					),
 					Effect.catchTag("PolicyDenied", () =>
-						Effect.succeed(c.json({ error: "Video not found" }, 404)),
+						Effect.succeed(
+							c.json(
+								{ error: "Video not found", code: "VIDEO_NOT_FOUND" },
+								404,
+							),
+						),
 					),
 					Effect.provide(makeCurrentUserLayer(user)),
 					provideOptionalAuth,
