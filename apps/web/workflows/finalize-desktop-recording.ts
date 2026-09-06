@@ -13,6 +13,7 @@ import {
 	claimProcessingAttempt,
 	type DesktopRecordingAttempt,
 	type DesktopRecordingAttemptFence,
+	deferForDailyProcessingBudget,
 	deferWithoutMediaServer,
 	ensureSegmentProcessingJob,
 	getProcessingState,
@@ -138,7 +139,9 @@ export async function finalizeDesktopRecordingWorkflow(
 				mediaServerUnavailable = true;
 				break;
 			}
-			const jobId = await startDesktopRecordingJob(attempt);
+			const started = await startDesktopRecordingJob(attempt);
+			if (typeof started === "object") continue;
+			const jobId = started;
 			for (;;) {
 				await sleep(COMPLETION_POLL_INTERVAL_MS);
 				const status = await pollDesktopRecordingAttempt({
@@ -406,7 +409,7 @@ async function buildDesktopSegmentsOutput({
 
 export async function startDesktopRecordingJob(
 	attempt: DesktopRecordingAttempt,
-): Promise<string | undefined> {
+): Promise<string | undefined | { status: "deferred" }> {
 	"use step";
 
 	const current = await getProcessingState(attempt);
@@ -414,6 +417,7 @@ export async function startDesktopRecordingJob(
 		throw new Error("Recording processing attempt was superseded");
 	}
 	if (current.remoteJobId) return current.remoteJobId;
+	if (current.state === "retry") return { status: "deferred" };
 	const [video] = await db()
 		.select()
 		.from(videos)
@@ -452,6 +456,10 @@ export async function startDesktopRecordingJob(
 		});
 	} catch (error) {
 		if (error instanceof MediaProcessingBudgetError) {
+			if (error.scope === "daily") {
+				await deferForDailyProcessingBudget(attempt);
+				return { status: "deferred" };
+			}
 			await markSourceBlocked({
 				videoId: current.videoId,
 				generation: current.generation,
