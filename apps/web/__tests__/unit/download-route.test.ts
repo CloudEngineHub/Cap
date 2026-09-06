@@ -20,13 +20,11 @@ describe("desktop download route", () => {
 		const cancel = vi.fn();
 		vi.stubGlobal(
 			"fetch",
-			vi
-				.fn()
-				.mockResolvedValue({
-					status: 206,
-					url: "https://downloads.example/cap.dmg",
-					body: { cancel },
-				}),
+			vi.fn().mockResolvedValue({
+				status: 206,
+				url: "https://downloads.example/cap.dmg",
+				body: { cancel },
+			}),
 		);
 		const response = await GET(request, {
 			params: Promise.resolve({ platform: "Apple-Silicon" }),
