@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { link } from "node:fs/promises";
 import { file } from "bun";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -36,6 +37,13 @@ import {
 	probeVideo,
 	probeVideoFile,
 } from "../lib/media-probe";
+import {
+	fetchMedia,
+	MediaTransferBudgetError,
+	materializeMedia,
+	releaseMaterializedMedia,
+	withMediaTransfers,
+} from "../lib/media-transfer";
 import type {
 	ResilientInputFlags,
 	StorageUploadTarget,
@@ -699,13 +707,15 @@ video.post("/process", async (c) => {
 	const jobId = generateJobId();
 	const job = createJob(jobId, videoId, userId, webhookUrl, webhookSecret);
 
-	processVideoAsync(
-		job.jobId,
-		videoUrl,
-		outputPresignedUrl,
-		thumbnailPresignedUrl,
-		previewGifPresignedUrl,
-		result.data,
+	withMediaTransfers(32 * 1024 ** 3, () =>
+		processVideoAsync(
+			job.jobId,
+			videoUrl,
+			outputPresignedUrl,
+			thumbnailPresignedUrl,
+			previewGifPresignedUrl,
+			result.data,
+		),
 	).catch((err) => {
 		console.error(
 			`[video/process] Async processing error for job ${jobId}:`,
@@ -776,13 +786,15 @@ video.post("/edit", async (c) => {
 	const jobId = generateJobId();
 	const job = createJob(jobId, videoId, userId, webhookUrl, webhookSecret);
 
-	editVideoAsync(
-		job.jobId,
-		sourceUrl,
-		outputPresignedUrl,
-		thumbnailPresignedUrl,
-		previewGifPresignedUrl,
-		result.data,
+	withMediaTransfers(32 * 1024 ** 3, () =>
+		editVideoAsync(
+			job.jobId,
+			sourceUrl,
+			outputPresignedUrl,
+			thumbnailPresignedUrl,
+			previewGifPresignedUrl,
+			result.data,
+		),
 	).catch((err) => {
 		console.error(`[video/edit] Async edit error for job ${jobId}:`, err);
 		const currentJob = getJob(jobId);
@@ -1589,6 +1601,8 @@ const strongObjectIdentitySchema = z
 	.max(1_024)
 	.regex(/^"[\x21\x23-\x7E\x80-\xFF]+"$/);
 const recordingAttemptFields = {
+	processingPriority: z.enum(["interactive", "recovery"]).optional(),
+	downloadBudgetBytes: z.number().int().positive().safe().optional(),
 	generation: z.string().min(1).max(200).optional(),
 	attemptId: z.string().min(1).max(200).optional(),
 	outputKey: z.string().min(1).max(1_024).optional(),
@@ -1688,6 +1702,8 @@ function recordingWorkerResponse(job: Job, ownerJobId: string) {
 }
 
 function classifySourceError(error: unknown): RecordingErrorCode {
+	if (error instanceof MediaTransferBudgetError)
+		return "processing-budget-exhausted";
 	if (
 		isRetryableRecordingVerificationError(error) ||
 		isBusyError(error) ||
@@ -1753,7 +1769,7 @@ video.post("/verify-recording", async (c) => {
 			);
 		return c.json(recordingWorkerResponse(existing, ownerJobId));
 	}
-	if (!canAcceptNewVideoProcess()) {
+	if (!canAcceptNewVideoProcess(body.processingPriority)) {
 		c.header("Retry-After", VIDEO_BUSY_RETRY_AFTER_SECONDS.toString());
 		return c.json(getMuxBusyResponseBody(getVideoCapacitySnapshot()), 503);
 	}
@@ -1785,7 +1801,19 @@ video.post("/verify-recording", async (c) => {
 		deleteJob(jobId);
 		return c.json(recordingWorkerResponse(job, ownerJobId));
 	}
-	void verifyUploadedRecordingAsync(jobId, body);
+	void withMediaTransfers(body.downloadBudgetBytes ?? body.fileSize * 3, () =>
+		verifyUploadedRecordingAsync(jobId, body),
+	).catch((error: unknown) => {
+		const current = getJob(jobId);
+		if (!current || ["complete", "error", "cancelled"].includes(current.phase))
+			return;
+		updateJob(jobId, {
+			phase: "error",
+			error: "Recording transfer could not complete",
+			errorCode: classifySourceError(error),
+		});
+		sendCurrentJobWebhook(jobId);
+	});
 	return c.json(recordingWorkerResponse(job, jobId));
 });
 
@@ -1797,7 +1825,8 @@ async function verifyUploadedRecordingAsync(
 	if (!updateJob(jobId, { abortController, phase: "processing", progress: 0 }))
 		return;
 	try {
-		const metadata = await probeVideo(body.videoUrl).catch(() => {
+		const metadata = await probeVideo(body.videoUrl).catch((error: unknown) => {
+			if (error instanceof MediaTransferBudgetError) throw error;
 			throw new Error(RECORDING_VERIFICATION_RETRY_ERROR);
 		});
 		if (
@@ -2067,7 +2096,7 @@ video.post("/mux-segments", async (c) => {
 		});
 	}
 
-	if (!canAcceptNewVideoProcess()) {
+	if (!canAcceptNewVideoProcess(body.data.processingPriority)) {
 		c.header("Retry-After", VIDEO_BUSY_RETRY_AFTER_SECONDS.toString());
 		return c.json(getMuxBusyResponseBody(getVideoCapacitySnapshot()), 503);
 	}
@@ -2108,18 +2137,20 @@ video.post("/mux-segments", async (c) => {
 		});
 	}
 
-	muxSegmentsAsync(
-		jobId,
-		videoId,
-		outputUpload,
-		thumbnailPresignedUrl,
-		previewGifPresignedUrl,
-		videoInitUrl,
-		videoSegUrls,
-		audioInitUrl ?? null,
-		audioSegUrls ?? null,
-		body.data.outputVerificationUrl,
-		body.data,
+	withMediaTransfers(body.data.downloadBudgetBytes ?? 32 * 1024 ** 3, () =>
+		muxSegmentsAsync(
+			jobId,
+			videoId,
+			outputUpload,
+			thumbnailPresignedUrl,
+			previewGifPresignedUrl,
+			videoInitUrl,
+			videoSegUrls,
+			audioInitUrl ?? null,
+			audioSegUrls ?? null,
+			body.data.outputVerificationUrl,
+			body.data,
+		),
 	).catch((err) => {
 		console.error(`[mux-segments] Async mux error for job ${jobId}:`, err);
 		const currentJob = getJob(jobId);
@@ -2218,7 +2249,23 @@ async function downloadUrlToFileOnce(
 ): Promise<void> {
 	const abortController = new AbortController();
 	const timeoutSignal = AbortSignal.timeout(120_000);
-	const resp = await fetch(url, {
+	const local = await materializeMedia(
+		url,
+		abortSignal ? AbortSignal.any([abortSignal, timeoutSignal]) : timeoutSignal,
+		source?.objectIdentity,
+	);
+	if (local) {
+		if (source && local.target.size !== source.size)
+			throw new MediaDownloadError(
+				"Recording source size changed while downloading",
+				false,
+				"source-changed",
+			);
+		await link(local.path, destPath);
+		await releaseMaterializedMedia(local.path);
+		return;
+	}
+	const resp = await fetchMedia(url, {
 		headers: source
 			? {
 					"If-Match": source.objectIdentity,
@@ -2332,7 +2379,8 @@ async function downloadUrlToFile(
 			return;
 		} catch (error) {
 			if (abortSignal?.aborted) throw error;
-			if (isBusyError(error)) throw error;
+			if (isBusyError(error) || error instanceof MediaTransferBudgetError)
+				throw error;
 
 			const downloadError =
 				error instanceof Error ? error : new Error(String(error));
@@ -2832,13 +2880,15 @@ async function muxSegmentsAsync(
 					? "cancelled"
 					: "error",
 			errorCode:
-				error instanceof MediaDownloadError
-					? error.errorCode
-					: isRetryableRecordingVerificationError(error) ||
-							isBusyError(error) ||
-							isTimeoutError(error)
-						? "processing-unavailable"
-						: errorCode,
+				error instanceof MediaTransferBudgetError
+					? "processing-budget-exhausted"
+					: error instanceof MediaDownloadError
+						? error.errorCode
+						: isRetryableRecordingVerificationError(error) ||
+								isBusyError(error) ||
+								isTimeoutError(error)
+							? "processing-unavailable"
+							: errorCode,
 			error: isRetryableRecordingVerificationError(error)
 				? "Recording verification temporarily unavailable (503)"
 				: error instanceof Error

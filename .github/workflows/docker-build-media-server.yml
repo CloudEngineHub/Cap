@@ -27,6 +27,7 @@ jobs:
   build:
     name: Build Docker Image (${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     strategy:
       matrix:
         include:
@@ -80,6 +81,8 @@ jobs:
             src/__tests__/lib/recording-verification.integration.test.ts \
             src/__tests__/lib/job-manager.test.ts
           docker run --rm --network none --entrypoint bun "$MEDIA_IMAGE" test \
+            src/__tests__/lib/media-transfer.test.ts
+          docker run --rm --network none --entrypoint bun "$MEDIA_IMAGE" test \
             src/__tests__/routes/recording-verification.test.ts
           docker run --rm --network none --entrypoint bun "$MEDIA_IMAGE" test \
             src/__tests__/routes/video.test.ts
@@ -97,6 +100,10 @@ jobs:
             --entrypoint bun "$MEDIA_IMAGE" test \
             src/__tests__/lib/recording-verification.integration.test.ts \
             --test-name-pattern 'streams a complete long recording'
+          docker run --rm --network none --cpus 2 --memory 2g \
+            -e MEDIA_SERVER_TRANSFER_PERFORMANCE_TESTS=1 \
+            --entrypoint bun "$MEDIA_IMAGE" test \
+            src/__tests__/lib/media-transfer.integration.test.ts
 
       - name: Export Digest
         if: github.event_name != 'pull_request'

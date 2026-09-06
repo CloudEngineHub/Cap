@@ -1395,6 +1395,65 @@ export type GoogleDriveRecordingRead = {
 	signal?: AbortSignal;
 };
 
+export const getGoogleDriveRecordingDownload = (
+	config: GoogleDriveIntegrationConfig,
+	fileId: string,
+	verification: { objectIdentity?: string; signal?: AbortSignal },
+	tokenStore?: GoogleDriveTokenStore,
+) =>
+	Effect.gen(function* () {
+		const metadata = yield* getGoogleDriveFileMetadata(
+			config,
+			fileId,
+			tokenStore,
+			verification.signal,
+		);
+		const identity = getRecordingObjectIdentity(
+			{
+				ETag: metadata.version
+					? `"${metadata.id}:${metadata.version}"`
+					: undefined,
+				RecordingContentETag: getGoogleDriveRecordingIdentity(metadata),
+			},
+			verification.objectIdentity,
+		);
+		if (
+			metadata.id !== fileId ||
+			(verification.objectIdentity && identity !== verification.objectIdentity)
+		) {
+			return yield* Effect.fail(
+				new Storage.StorageError({
+					cause: new RecordingObjectReadError(412, "Recording object changed"),
+				}),
+			);
+		}
+		const size = getUsableGoogleDriveFileSize(metadata);
+		if (
+			!identity ||
+			!size ||
+			!metadata.headRevisionId ||
+			!metadata.sha256Checksum?.match(/^[a-fA-F0-9]{64}$/)
+		) {
+			return yield* Effect.fail(
+				new Storage.StorageError({
+					cause: new RecordingObjectReadError(
+						503,
+						"Recording revision identity is unavailable",
+					),
+				}),
+			);
+		}
+		const token = yield* loadGoogleDriveAccessToken(config, false, tokenStore);
+		return {
+			version: 1 as const,
+			url: `${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}/revisions/${encodeURIComponent(metadata.headRevisionId)}?alt=media`,
+			authorization: `Bearer ${token.accessToken}`,
+			objectIdentity: identity,
+			size,
+			sha256: metadata.sha256Checksum.toLowerCase(),
+		};
+	});
+
 export const getGoogleDriveRecordingResponse = (
 	config: GoogleDriveIntegrationConfig,
 	fileId: string,

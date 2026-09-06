@@ -5,6 +5,7 @@ import { lstat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { Readable } from "node:stream";
 import { PROCESS_TIMEOUT_MS } from "./media-common";
+import { fetchMedia, materializeMedia } from "./media-transfer";
 import {
 	RecordingTimingError,
 	type RecordingVideoTiming,
@@ -987,7 +988,7 @@ async function readRemoteIdentity(
 	if (expectedObjectIdentity) headers["If-Match"] = expectedObjectIdentity;
 	let response: Response;
 	try {
-		response = await fetch(input, { headers, signal: abortSignal });
+		response = await fetchMedia(input, { headers, signal: abortSignal });
 	} catch {
 		throw new RecordingVerificationError(
 			"Recording object identity could not be read",
@@ -1040,7 +1041,7 @@ async function hashRemoteRecording(
 ): Promise<string> {
 	let response: Response;
 	try {
-		response = await fetch(input, {
+		response = await fetchMedia(input, {
 			headers: {
 				"If-Match": objectIdentity,
 				"X-Cap-Recording-Verification": "1",
@@ -1160,10 +1161,11 @@ export async function verifyRemoteRecording(
 				true,
 			);
 		}
+		const local = await materializeMedia(input, signal, before.objectIdentity);
 		const evidence = await decodeRecording(
-			input,
+			local?.path ?? input,
 			{ ...options, abortSignal: signal, timeoutMs: remainingMs },
-			before.objectIdentity,
+			local ? undefined : before.objectIdentity,
 		);
 		const remoteSha256 =
 			options.expectedSha256 || options.hashContent
