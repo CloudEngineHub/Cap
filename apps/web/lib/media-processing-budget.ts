@@ -39,7 +39,7 @@ export async function reserveMediaProcessingBudget(input: {
 		input.sourceBytes,
 	);
 	const configured = Number(
-		process.env.MEDIA_PROCESSING_DAILY_BUDGET_GIB ?? "100",
+		process.env.MEDIA_PROCESSING_DAILY_BUDGET_GIB ?? "512",
 	);
 	if (
 		!Number.isFinite(configured) ||

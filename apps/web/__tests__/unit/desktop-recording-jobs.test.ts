@@ -90,6 +90,12 @@ const verification: RecordingVerification = {
 let rows: Record<string, Row[]>;
 let lockingOperations: string[];
 
+function getJobRow(): Row {
+	const job = rows.jobs?.[0];
+	if (!job) throw new Error("Missing job fixture");
+	return job;
+}
+
 function matches(row: Row, condition?: Condition): boolean {
 	if (!condition) return true;
 	if (condition.op === "and")
@@ -723,7 +729,7 @@ describe("retained-source retry policy", () => {
 	it("pauses a repeatedly failing recording and retains its source", async () => {
 		const attempt = await createAttempt();
 		await persistCommittedSource(attempt, source);
-		Object.assign(rows.jobs[0], { attemptCount: 5 });
+		Object.assign(getJobRow(), { attemptCount: 5 });
 		expect(
 			await scheduleRetry({
 				...attempt,
@@ -731,23 +737,23 @@ describe("retained-source retry policy", () => {
 				errorMessage: "Timeline mismatch",
 			}),
 		).toBe(true);
-		expect(rows.jobs[0]).toMatchObject({
+		expect(rows.jobs?.[0]).toMatchObject({
 			state: "source-blocked",
 			source,
 			errorCode: "processing-retry-exhausted",
 			errorMessage: "output-invalid: Timeline mismatch",
 		});
-		expect(rows.uploads[0]).toMatchObject({ phase: "error" });
+		expect(rows.uploads?.[0]).toMatchObject({ phase: "error" });
 		vi.setSystemTime(new Date(now.getTime() + 24 * 60 * 60_000));
 		expect(
 			await claimProcessingAttempt({ videoId, generation: attempt.generation }),
 		).toBeNull();
-		expect(rows.jobs[0]?.attemptCount).toBe(5);
+		expect(rows.jobs?.[0]?.attemptCount).toBe(5);
 	});
 
 	it("pauses an exhausted legacy job before downloading its source again", async () => {
 		const attempt = await createAttempt();
-		Object.assign(rows.jobs[0], {
+		Object.assign(getJobRow(), {
 			attemptCount: 220,
 			state: "retry",
 			leaseExpiresAt: null,
@@ -756,12 +762,12 @@ describe("retained-source retry policy", () => {
 		expect(
 			await claimProcessingAttempt({ videoId, generation: attempt.generation }),
 		).toBeNull();
-		expect(rows.jobs[0]).toMatchObject({
+		expect(rows.jobs?.[0]).toMatchObject({
 			attemptCount: 220,
 			errorCode: "processing-retry-exhausted",
 		});
 		await ensureSegmentProcessingJob({ videoId, userId });
-		expect(rows.jobs[0]).toMatchObject({
+		expect(rows.jobs?.[0]).toMatchObject({
 			state: "source-blocked",
 			errorCode: "processing-retry-exhausted",
 		});
@@ -769,11 +775,11 @@ describe("retained-source retry policy", () => {
 
 	it("does not interrupt an active final attempt", async () => {
 		const attempt = await createAttempt();
-		Object.assign(rows.jobs[0], { attemptCount: 5 });
+		Object.assign(getJobRow(), { attemptCount: 5 });
 		expect(
 			await claimProcessingAttempt({ videoId, generation: attempt.generation }),
 		).toBeNull();
-		expect(rows.jobs[0]).toMatchObject({
+		expect(rows.jobs?.[0]).toMatchObject({
 			state: "committing",
 			attemptId: attempt.attemptId,
 		});
