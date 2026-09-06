@@ -666,7 +666,10 @@ export class InstantRecordingUploader {
 					throw new CancelledUploadError();
 				}
 
-				if (attempt >= MAX_PART_UPLOAD_ATTEMPTS) {
+				if (
+					attempt >= MAX_PART_UPLOAD_ATTEMPTS ||
+					(error instanceof HttpRequestError && error.status === 404)
+				) {
 					this.updateChunkState(partNumber, { status: "error" });
 					this.pendingUploadBytes = Math.max(
 						0,
