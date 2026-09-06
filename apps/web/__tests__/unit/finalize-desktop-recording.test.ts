@@ -5,6 +5,7 @@ import type {
 	DesktopRecordingAttempt,
 	DesktopRecordingJob,
 } from "@/lib/desktop-recording-jobs";
+import { MediaProcessingBudgetError } from "@/lib/media-processing-budget";
 
 const mocks = vi.hoisted(() => ({
 	state: vi.fn(),
@@ -27,6 +28,11 @@ const mocks = vi.hoisted(() => ({
 	fetch: vi.fn(),
 	put: vi.fn(),
 	databaseRows: vi.fn(),
+	reserveBudget: vi.fn(),
+}));
+vi.mock("@/lib/media-processing-budget", () => ({
+	reserveMediaProcessingBudget: mocks.reserveBudget,
+	MediaProcessingBudgetError: class extends Error {},
 }));
 vi.mock("@cap/database", () => ({
 	db: () => ({
@@ -141,6 +147,7 @@ function withCurrent(update: Partial<DesktopRecordingJob>) {
 }
 
 beforeEach(() => {
+	mocks.reserveBudget.mockResolvedValue(100_000_000);
 	mocks.databaseRows.mockResolvedValue([
 		{ id: "video", ownerId: "user", source: { type: "desktopSegments" } },
 	]);
@@ -501,6 +508,17 @@ describe("source commitment and media request compatibility", () => {
 		expect(mocks.fetch).not.toHaveBeenCalled();
 	});
 
+	it("blocks an exhausted transfer budget before dispatching media work", async () => {
+		const error = new MediaProcessingBudgetError("daily");
+		mocks.reserveBudget.mockRejectedValueOnce(error);
+		await expect(startDesktopRecordingJob(fixture)).rejects.toBe(error);
+		expect(mocks.blocked).toHaveBeenCalledWith(
+			expect.objectContaining({ errorCode: "processing-budget-exhausted" }),
+		);
+		expect(mocks.fetch).not.toHaveBeenCalled();
+		expect(mocks.put).not.toHaveBeenCalled();
+	});
+
 	it("preserves incomplete originals without calling the media server", async () => {
 		withCurrent({ source: null, state: "committing" });
 		mocks.commitSource.mockRejectedValue(
@@ -547,6 +565,13 @@ describe("source commitment and media request compatibility", () => {
 		});
 		mocks.sourceUrls.mockResolvedValue({
 			videoUrl: "https://source.test/recording.mp4",
+			sourceObjects: [
+				{
+					url: "https://source.test/recording.mp4",
+					size: 1000,
+					objectIdentity: '"snapshot"',
+				},
+			],
 			sourceObjectIdentity: '"snapshot"',
 			outputKey: "user/video/.recording/sources/generation/mp4/0.mp4",
 		});
@@ -584,6 +609,13 @@ describe("source commitment and media request compatibility", () => {
 		});
 		mocks.sourceUrls.mockResolvedValue({
 			videoUrl: "https://source.test/recording.mp4",
+			sourceObjects: [
+				{
+					url: "https://source.test/recording.mp4",
+					size: 1000,
+					objectIdentity: '"snapshot"',
+				},
+			],
 			sourceObjectIdentity: '"snapshot"',
 			outputKey: "user/video/.recording/sources/generation/mp4/0.mp4",
 		});

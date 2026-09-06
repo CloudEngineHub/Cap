@@ -12,6 +12,7 @@ import {
 	withTimeout,
 } from "./media-common";
 import { probeVideoFile } from "./media-probe";
+import { fetchMedia, materializeMedia } from "./media-transfer";
 import {
 	RecordingTimingError,
 	readRecordingVideoTiming,
@@ -1229,6 +1230,9 @@ export async function downloadVideoToTemp(
 		return await downloadStreamingVideoToTemp(videoUrl, abortSignal);
 	}
 
+	const local = await materializeMedia(videoUrl, abortSignal);
+	if (local) return { path: local.path, cleanup: async () => {} };
+
 	const tempFile = await createTempFile(
 		normalizeVideoInputExtension(inputExtension),
 	);
@@ -1239,7 +1243,7 @@ export async function downloadVideoToTemp(
 			? AbortSignal.any([abortSignal, timeoutSignal])
 			: timeoutSignal;
 
-		const response = await fetch(videoUrl, {
+		const response = await fetchMedia(videoUrl, {
 			signal: combinedSignal,
 		});
 

@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+import { serverEnv } from "@cap/env";
 import {
 	provideOptionalAuth,
 	Storage,
@@ -122,6 +124,21 @@ const getPolicyVideo = (videoId: Video.VideoId) =>
 	});
 
 export async function GET(request: NextRequest) {
+	const internalDownload =
+		request.headers.get("x-cap-internal-download") === "1";
+	if (internalDownload) {
+		const expected = serverEnv().MEDIA_SERVER_WEBHOOK_SECRET;
+		const provided = request.headers.get("x-media-server-secret");
+		if (
+			!expected ||
+			!provided ||
+			Buffer.byteLength(expected) !== Buffer.byteLength(provided) ||
+			!timingSafeEqual(Buffer.from(expected), Buffer.from(provided))
+		) {
+			return new Response("Unauthorized", { status: 401 });
+		}
+	}
+
 	const videoIdParam = request.nextUrl.searchParams.get("videoId");
 	const key = request.nextUrl.searchParams.get("key");
 	const token = request.nextUrl.searchParams.get("token");
@@ -163,6 +180,22 @@ export async function GET(request: NextRequest) {
 		if (!("getObjectResponse" in storage)) {
 			const url = yield* storage.getSignedObjectUrl(key);
 			return Response.redirect(url);
+		}
+
+		if (internalDownload) {
+			if (!("getInternalDownload" in storage))
+				return new Response("Unsupported storage", { status: 400 });
+			const target = yield* storage.getInternalDownload(key, {
+				objectIdentity: request.headers.get("if-match") ?? undefined,
+				signal: request.signal,
+			});
+			return Response.json(target, {
+				headers: {
+					"Cache-Control": "private, no-store",
+					"Vercel-CDN-Cache-Control": "no-store",
+					Vary: "x-cap-internal-download, x-media-server-secret",
+				},
+			});
 		}
 
 		const verificationRequested =

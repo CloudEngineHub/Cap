@@ -30,6 +30,10 @@ import {
 } from "@/lib/desktop-recording-source";
 import type { RecordingVerification } from "@/lib/desktop-recording-verification";
 import { invalidateGoogleDriveStorageQuotaCache } from "@/lib/google-drive-storage-quota-cache";
+import {
+	MediaProcessingBudgetError,
+	reserveMediaProcessingBudget,
+} from "@/lib/media-processing-budget";
 import { transcribeVideo } from "@/lib/transcribe";
 import { decodeStorageVideo } from "@/lib/video-storage";
 import { runWorkflowPromise } from "@/lib/workflow-runtime";
@@ -435,8 +439,33 @@ export async function startDesktopRecordingJob(
 		}
 		throw error;
 	});
+	let downloadBudgetBytes: number;
+	try {
+		downloadBudgetBytes = await reserveMediaProcessingBudget({
+			videoId: current.videoId,
+			generation: current.generation,
+			attemptId: attempt.attemptId,
+			sourceBytes: urls.sourceObjects.reduce(
+				(total, object) => total + object.size,
+				0,
+			),
+		});
+	} catch (error) {
+		if (error instanceof MediaProcessingBudgetError) {
+			await markSourceBlocked({
+				videoId: current.videoId,
+				generation: current.generation,
+				attemptId: attempt.attemptId,
+				errorCode: "processing-budget-exhausted",
+				errorMessage: error.message,
+			});
+		}
+		throw error;
+	}
 	const webhookBaseUrl = env.MEDIA_SERVER_WEBHOOK_URL || env.WEB_URL;
 	const context = {
+		downloadBudgetBytes,
+		processingPriority: current.attemptCount > 1 ? "recovery" : "interactive",
 		videoId: current.videoId,
 		userId: current.ownerId,
 		generation: current.generation,

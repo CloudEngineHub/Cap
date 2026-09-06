@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
 	head: vi.fn(),
 	read: vi.fn(),
+	download: vi.fn(),
 	token: null as { videoId: string; key: string } | null,
 	video: {
 		id: "video",
@@ -27,7 +28,11 @@ vi.mock("@cap/web-backend", async () => {
 		Storage: {
 			getAccessForVideo: () =>
 				Effect.succeed([
-					{ headObject: mocks.head, getObjectResponse: mocks.read },
+					{
+						headObject: mocks.head,
+						getObjectResponse: mocks.read,
+						getInternalDownload: mocks.download,
+					},
 				]),
 		},
 		Videos: Effect.succeed({
@@ -39,6 +44,9 @@ vi.mock("@cap/web-backend", async () => {
 		verifyStorageObjectToken: () => mocks.token,
 	};
 });
+vi.mock("@cap/env", () => ({
+	serverEnv: () => ({ MEDIA_SERVER_WEBHOOK_SECRET: "test-media-secret" }),
+}));
 vi.mock("@/lib/server", async () => {
 	const { Effect } = await import("effect");
 	return { runPromise: Effect.runPromise };
@@ -74,6 +82,42 @@ describe("recording verification object reads", () => {
 				}),
 			),
 		);
+	});
+
+	it("does not expose Drive credentials to ordinary clients", async () => {
+		expect((await request({ "x-cap-internal-download": "1" })).status).toBe(
+			401,
+		);
+		expect(
+			(
+				await request({
+					"x-cap-internal-download": "1",
+					"x-media-server-secret": "invalid",
+				})
+			).status,
+		).toBe(401);
+		expect(mocks.download).not.toHaveBeenCalled();
+	});
+
+	it("authorizes an internal descriptor without downloading media", async () => {
+		mocks.download.mockReturnValue(
+			Effect.succeed({
+				version: 1,
+				url: "https://www.googleapis.com/drive/v3/files/file/revisions/revision?alt=media",
+			}),
+		);
+		const response = await request({
+			"x-cap-internal-download": "1",
+			"x-media-server-secret": "test-media-secret",
+			"if-match": '"identity"',
+		});
+		expect(response.status).toBe(200);
+		expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+		expect(mocks.download).toHaveBeenCalledWith(
+			"owner/video/result.mp4",
+			expect.objectContaining({ objectIdentity: '"identity"' }),
+		);
+		expect(mocks.read).not.toHaveBeenCalled();
 	});
 
 	it("does not add metadata requests to ordinary playback", async () => {

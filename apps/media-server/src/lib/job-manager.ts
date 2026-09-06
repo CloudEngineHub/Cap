@@ -24,7 +24,8 @@ export type RecordingErrorCode =
 	| "source-missing"
 	| "source-changed"
 	| "output-invalid"
-	| "processing-unavailable";
+	| "processing-unavailable"
+	| "processing-budget-exhausted";
 
 export interface RecordingVerificationRequest {
 	version: 1;
@@ -324,10 +325,17 @@ export function hasCriticalMemoryPressure(): boolean {
 	return getSystemResources().memoryPressure >= MEMORY_REJECT_THRESHOLD;
 }
 
-export function canAcceptNewVideoProcess(): boolean {
+export function canAcceptNewVideoProcess(
+	priority: "interactive" | "recovery" = "interactive",
+): boolean {
 	const active = getActiveVideoProcessCount();
 	const resources = getSystemResources();
-	return active < resources.effectiveMax;
+	return (
+		active <
+		(priority === "recovery" && resources.effectiveMax > 1
+			? Math.max(1, Math.floor(resources.effectiveMax / 2))
+			: resources.effectiveMax)
+	);
 }
 
 export function generateJobId(): string {

@@ -25,6 +25,7 @@ import {
 	getGoogleDriveFileMetadata,
 	getGoogleDriveObjectResponse,
 	getGoogleDriveObjectText,
+	getGoogleDriveRecordingDownload,
 	getGoogleDriveRecordingResponse,
 	parseVideoIdFromObjectKey,
 	syncGoogleDriveVideoNames,
@@ -1030,6 +1031,20 @@ const makeGoogleDriveAccess = ({
 				mapStorageError,
 				Effect.map((url) => toDriveUploadTarget(url, input.contentType)),
 			),
+		getInternalDownload: (
+			key: string,
+			verification: { objectIdentity?: string; signal?: AbortSignal },
+		) =>
+			getObjectRecord(key).pipe(
+				Effect.flatMap((object) =>
+					getGoogleDriveRecordingDownload(
+						config,
+						object.providerObjectId,
+						verification,
+						tokenStore,
+					),
+				),
+			),
 		getObjectResponse: (
 			key: string,
 			range?: string | null,
@@ -1093,6 +1108,10 @@ function withPublishedRecordingOutput<
 	};
 	if (access.provider === "googleDrive") {
 		return Object.assign({}, access, shared, {
+			getInternalDownload: (
+				key: string,
+				verification: { objectIdentity?: string; signal?: AbortSignal },
+			) => access.getInternalDownload(resolve(key), verification),
 			getObjectResponse: (
 				key: string,
 				range?: string | null,
