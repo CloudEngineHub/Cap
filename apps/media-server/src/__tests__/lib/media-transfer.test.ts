@@ -175,6 +175,60 @@ describe("parallel transfer admission and cache reuse", () => {
 		expect(downloads()).toBe(1);
 	});
 
+	test("downloads one revision once across six concurrent job contexts", async () => {
+		const downloads = network();
+		const input = url();
+		const paths = await Promise.all(
+			Array.from({ length: 6 }, () =>
+				withMediaTransfers(content.length, async () => {
+					const local = await materializeMedia(input);
+					if (!local) throw new Error("Missing materialized input");
+					expect(await readFile(local.path)).toEqual(content);
+					return local.path;
+				}),
+			),
+		);
+		expect(new Set(paths).size).toBe(1);
+		expect(downloads()).toBe(1);
+	});
+
+	test("canceling a waiting job does not cancel the shared owner's download", async () => {
+		process.env.MEDIA_SERVER_WEBHOOK_SECRET = "worker-secret";
+		let downloads = 0;
+		let release = () => {};
+		let entered = () => {};
+		const started = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		globalThis.fetch = fetcher(async (input) => {
+			if (String(input).startsWith("https://cap.so/"))
+				return Response.json(target());
+			downloads++;
+			entered();
+			await gate;
+			return new Response(content, {
+				headers: { "Content-Length": String(content.length) },
+			});
+		});
+		const input = url();
+		const owner = withMediaTransfers(content.length, () =>
+			materializeMedia(input),
+		);
+		await started;
+		const controller = new AbortController();
+		const waiting = withMediaTransfers(content.length, () =>
+			materializeMedia(input, controller.signal),
+		);
+		controller.abort(new Error("Waiting job canceled"));
+		await expect(waiting).rejects.toThrow("Waiting job canceled");
+		release();
+		expect(await owner).toBeDefined();
+		expect(downloads).toBe(1);
+	});
+
 	test("releases one cache retention after concurrent reads in the same job", async () => {
 		const downloads = network();
 		const input = url();
@@ -193,6 +247,28 @@ describe("parallel transfer admission and cache reuse", () => {
 			clock.mockRestore();
 		}
 		expect(downloads()).toBe(2);
+	});
+
+	test("keeps a shared pathname until both same-job consumers release it", async () => {
+		network();
+		const input = url();
+		await withMediaTransfers(content.length * 2, async () => {
+			const [first, second] = await Promise.all([
+				materializeMedia(input),
+				materializeMedia(input),
+			]);
+			if (!first || !second) throw new Error("Missing shared input");
+			await releaseMaterializedMedia(first.path);
+			const now = Date.now();
+			const clock = spyOn(Date, "now").mockReturnValue(now + 31 * 60_000);
+			try {
+				await materializeMedia(url());
+				expect(await readFile(second.path)).toEqual(content);
+				await releaseMaterializedMedia(second.path);
+			} finally {
+				clock.mockRestore();
+			}
+		});
 	});
 
 	test("retains a worker input after its cache pathname is removed", async () => {

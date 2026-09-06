@@ -28,11 +28,13 @@ type TransferContext = {
 	reserved: number;
 	cacheHits: number;
 	files: Map<string, CachedFile>;
+	references: Map<string, number>;
 	controller: AbortController;
 	pending: Map<string, Promise<{ path: string; target: MediaDownloadTarget }>>;
 };
 const transfers = new AsyncLocalStorage<TransferContext>();
 const cache = new Map<string, CachedFile>();
+const pendingTransfers = new Map<string, Promise<void>>();
 const cacheBase = join(tmpdir(), "cap-media-download-cache");
 const cacheRoot = join(cacheBase, String(process.pid));
 const CACHE_BYTES = 2 * 1024 ** 3;
@@ -99,6 +101,7 @@ async function pruneCache() {
 	)) {
 		if (
 			entry.users ||
+			pendingTransfers.has(key) ||
 			(cacheBytes <= CACHE_BYTES && Date.now() - entry.usedAt < CACHE_TTL_MS)
 		)
 			continue;
@@ -121,6 +124,7 @@ export async function withMediaTransfers<T>(
 		reserved: 0,
 		cacheHits: 0,
 		files: new Map(),
+		references: new Map(),
 		controller: new AbortController(),
 		pending: new Map(),
 	};
@@ -138,6 +142,7 @@ export async function withMediaTransfers<T>(
 		} finally {
 			clearTimeout(timeout);
 			context.controller.abort();
+			await Promise.allSettled(context.pending.values());
 			for (const [key, entry] of context.files) {
 				entry.users--;
 				if (cache.get(key) !== entry && !entry.users)
@@ -289,6 +294,39 @@ export async function downloadDriveRevision(
 	}
 }
 
+async function serializeTransfer<T>(
+	key: string,
+	signal: AbortSignal,
+	run: () => Promise<T>,
+): Promise<T> {
+	const previous = pendingTransfers.get(key) ?? Promise.resolve();
+	let release = () => {};
+	const gate = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const tail = previous.then(() => gate);
+	pendingTransfers.set(key, tail);
+	let onAbort = () => {};
+	try {
+		await Promise.race([
+			previous,
+			new Promise<never>((_resolve, reject) => {
+				onAbort = () => reject(signal.reason);
+				signal.addEventListener("abort", onAbort, { once: true });
+				if (signal.aborted) onAbort();
+			}),
+		]);
+		signal.throwIfAborted();
+		return await run();
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+		release();
+		void tail.then(() => {
+			if (pendingTransfers.get(key) === tail) pendingTransfers.delete(key);
+		});
+	}
+}
+
 export async function materializeMedia(
 	input: string,
 	signal?: AbortSignal,
@@ -316,7 +354,11 @@ export async function materializeMedia(
 		.digest("hex");
 	await pruneCache();
 	const pending = context.pending.get(key);
-	if (pending) return pending;
+	if (pending) {
+		const result = await pending;
+		context.references.set(key, (context.references.get(key) ?? 0) + 1);
+		return result;
+	}
 	const download = async () => {
 		const existing = context.files.get(key) ?? cache.get(key);
 		if (existing) {
@@ -368,10 +410,12 @@ export async function materializeMedia(
 			context.reserved -= reservationRemaining;
 		}
 	};
-	const operation = download();
+	const operation = serializeTransfer(key, combinedSignal, download);
 	context.pending.set(key, operation);
 	try {
-		return await operation;
+		const result = await operation;
+		context.references.set(key, (context.references.get(key) ?? 0) + 1);
+		return result;
 	} finally {
 		context.pending.delete(key);
 	}
@@ -382,6 +426,12 @@ export async function releaseMaterializedMedia(path: string) {
 	if (!context) return;
 	for (const [key, entry] of context.files) {
 		if (entry.path !== path) continue;
+		const references = context.references.get(key) ?? 0;
+		if (references > 1) {
+			context.references.set(key, references - 1);
+			return;
+		}
+		context.references.delete(key);
 		context.files.delete(key);
 		entry.users--;
 		if (cache.get(key) !== entry && !entry.users)
