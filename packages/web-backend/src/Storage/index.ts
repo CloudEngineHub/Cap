@@ -1033,11 +1033,11 @@ const makeGoogleDriveAccess = ({
 		getObjectResponse: (
 			key: string,
 			range?: string | null,
-			verification?: GoogleDriveRecordingRead,
+			verification?: GoogleDriveRecordingRead | { signal: AbortSignal },
 		) =>
 			getObjectRecord(key).pipe(
 				Effect.flatMap((object) =>
-					verification
+					verification && "objectIdentity" in verification
 						? getGoogleDriveRecordingResponse(
 								config,
 								object.providerObjectId,
@@ -1046,7 +1046,13 @@ const makeGoogleDriveAccess = ({
 								tokenStore,
 							)
 						: withRecoveredDriveFile(key, object, (fileId) =>
-								getGoogleDriveObjectResponse(config, fileId, range, tokenStore),
+								getGoogleDriveObjectResponse(
+									config,
+									fileId,
+									range,
+									tokenStore,
+									verification?.signal,
+								),
 							),
 				),
 			),

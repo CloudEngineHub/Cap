@@ -82,6 +82,33 @@ describe("recording verification object reads", () => {
 		expect(mocks.head).not.toHaveBeenCalled();
 	});
 
+	it("cancels ordinary upstream downloads when the client disconnects", async () => {
+		const controller = new AbortController();
+		const req = new NextRequest(
+			"https://cap.test/api/storage/object?videoId=video&key=owner/video/result.mp4&token=test",
+			{ signal: controller.signal },
+		);
+		await GET(req);
+		expect(mocks.read).toHaveBeenCalledWith("owner/video/result.mp4", null, {
+			signal: req.signal,
+		});
+		controller.abort();
+		expect(mocks.read.mock.calls.at(-1)?.[2].signal.aborted).toBe(true);
+	});
+
+	it("answers ordinary HEAD requests without downloading the video", async () => {
+		const response = await HEAD(
+			new NextRequest(
+				"https://cap.test/api/storage/object?videoId=video&key=owner/video/result.mp4&token=test",
+				{ method: "HEAD" },
+			),
+		);
+		expect(response.status).toBe(200);
+		expect(response.headers.get("Content-Length")).toBe("100");
+		expect(await response.text()).toBe("");
+		expect(mocks.read).not.toHaveBeenCalled();
+	});
+
 	it("serves content-bound HEAD without downloading media", async () => {
 		const identity = `"cap-drive-content-v1:${"a".repeat(64)}"`;
 		mocks.head.mockReturnValue(
@@ -261,7 +288,9 @@ describe("recording verification object reads", () => {
 			mocks.video.source = { type: "desktopMP4", [field]: key };
 			const response = await request({}, key);
 			expect(response.status).toBe(206);
-			expect(mocks.read).toHaveBeenCalledWith(key, null);
+			expect(mocks.read).toHaveBeenCalledWith(key, null, {
+				signal: expect.any(AbortSignal),
+			});
 		},
 	);
 });

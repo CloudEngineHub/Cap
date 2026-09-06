@@ -1373,6 +1373,7 @@ export const getGoogleDriveObjectResponse = (
 	fileId: string,
 	range?: string | null,
 	tokenStore?: GoogleDriveTokenStore,
+	signal?: AbortSignal,
 ) =>
 	Effect.gen(function* () {
 		const headers: Record<string, string> = {};
@@ -1382,7 +1383,7 @@ export const getGoogleDriveObjectResponse = (
 			appendSharedDriveCreateParams(
 				`${DRIVE_API_BASE}/files/${encodeURIComponent(fileId)}?alt=media`,
 			),
-			{ headers },
+			{ headers, signal },
 			tokenStore,
 		);
 

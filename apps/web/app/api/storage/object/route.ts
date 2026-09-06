@@ -168,12 +168,14 @@ export async function GET(request: NextRequest) {
 		const verificationRequested =
 			request.headers.get("x-cap-recording-verification") === "1";
 		const expectedIdentity = request.headers.get("if-match");
-		const head = verificationRequested
-			? yield* storage.headObject(key)
-			: undefined;
-		const identity = head
-			? getRecordingObjectIdentity(head, expectedIdentity ?? undefined)
-			: undefined;
+		const head =
+			verificationRequested || request.method === "HEAD"
+				? yield* storage.headObject(key)
+				: undefined;
+		const identity =
+			verificationRequested && head
+				? getRecordingObjectIdentity(head, expectedIdentity ?? undefined)
+				: undefined;
 		if (verificationRequested && !identity) {
 			return new Response("Object identity is unavailable", { status: 503 });
 		}
@@ -184,14 +186,9 @@ export async function GET(request: NextRequest) {
 		) {
 			return new Response("Object changed", { status: 412 });
 		}
-		if (
-			verificationRequested &&
-			request.method === "HEAD" &&
-			head &&
-			identity
-		) {
+		if (request.method === "HEAD" && head) {
 			const headers = new Headers(CACHE_CONTROL_HEADERS);
-			headers.set("ETag", identity);
+			if (identity) headers.set("ETag", identity);
 			headers.set("Accept-Ranges", "bytes");
 			if (head.ContentLength !== undefined)
 				headers.set("Content-Length", String(head.ContentLength));
@@ -203,7 +200,9 @@ export async function GET(request: NextRequest) {
 					objectIdentity: identity,
 					signal: request.signal,
 				})
-			: yield* storage.getObjectResponse(key, request.headers.get("range"));
+			: yield* storage.getObjectResponse(key, request.headers.get("range"), {
+					signal: request.signal,
+				});
 		const headers = new Headers(CACHE_CONTROL_HEADERS);
 		if (identity) headers.set("ETag", identity);
 		copyHeader(upstream.headers, headers, "content-type", "Content-Type");
