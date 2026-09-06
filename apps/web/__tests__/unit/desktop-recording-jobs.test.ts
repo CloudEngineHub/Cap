@@ -5,18 +5,19 @@ import {
 	claimProcessingAttempt,
 	type DesktopRecordingAttemptFence,
 	type DesktopRecordingJob,
-	deferForDailyProcessingBudget,
 	ensureSegmentProcessingJob,
 	getDesktopRecordingRetryDelay,
 	getDesktopRecordingWorkerCheckpoint,
 	heartbeatAttempt,
 	initializeSourceCommitCheckpoint,
 	isDesktopRecordingJobRecoverable,
+	listRecoverableSegmentJobs,
 	markSourceBlocked,
 	persistCommittedSource,
 	persistSourceCommitCheckpoint,
 	retireDesktopRecordingJobForOutputReplacement,
 	scheduleRetry,
+	waitForDesktopRecordingCapacity,
 } from "@/lib/desktop-recording-jobs";
 import type {
 	RecordingUploadReceipt,
@@ -45,6 +46,9 @@ vi.mock("@cap/database/schema", () => {
 			"nextRetryAt",
 			"leaseExpiresAt",
 			"remoteJobId",
+			"errorCode",
+			"verification",
+			"output",
 		]),
 	};
 });
@@ -134,6 +138,12 @@ function createClient() {
 			const query = {
 				from(value: Table) {
 					table = value.table;
+					return query;
+				},
+				innerJoin() {
+					return query;
+				},
+				orderBy() {
 					return query;
 				},
 				where(value: Condition) {
@@ -601,68 +611,57 @@ describe("late verification and source commitment", () => {
 });
 
 describe("retained-source retry policy", () => {
-	it("waits for the next UTC allowance without spending the final attempt", async () => {
-		await createAttempt();
+	it("persists capacity waiting while retaining the attempt and extending its lease past backoff", async () => {
+		const attempt = await createAttempt();
 		Object.assign(getJobRow(), {
 			state: "processing",
 			source,
-			attemptId: "budget-attempt",
-			attemptCount: 5,
 			remoteJobId: null,
-		});
-		const fence = {
-			videoId,
-			generation: String(getJobRow().generation),
-			attemptId: "budget-attempt",
-		};
-		expect(await deferForDailyProcessingBudget({ ...fence, now })).toBe(true);
-		expect(await deferForDailyProcessingBudget({ ...fence, now })).toBe(false);
-		expect(getJobRow()).toMatchObject({
-			state: "retry",
-			attemptCount: 4,
-			source,
-			nextRetryAt: new Date("2026-09-03T00:00:00Z"),
-			leaseExpiresAt: null,
+			attemptCount: 5,
 		});
 		expect(
-			await claimProcessingAttempt({
-				videoId,
-				generation: fence.generation,
+			await waitForDesktopRecordingCapacity({
+				...attempt,
 				now,
+				retryAfterMs: 320_000,
 			}),
-		).toBeNull();
-		expect(
-			await claimProcessingAttempt({
-				videoId,
-				generation: fence.generation,
-				now: new Date("2026-09-03T00:00:00Z"),
-			}),
-		).toMatchObject({ attemptCount: 5, state: "processing", source });
+		).toBe(true);
+		expect(getJobRow()).toMatchObject({
+			state: "processing",
+			source,
+			attemptId: attempt.attemptId,
+			attemptCount: 5,
+			output: { kind: "desktop-recording-capacity-wait" },
+			nextRetryAt: new Date(now.getTime() + 320_000),
+		});
+		expect((getJobRow().leaseExpiresAt as Date).getTime()).toBeGreaterThan(
+			now.getTime() + 320_000,
+		);
+		expect(rows.uploads?.[0]?.processingMessage).toContain(
+			"Waiting for a processing slot",
+		);
 	});
 
-	it("does not defer an attempt already owned by a remote worker", async () => {
-		await createAttempt();
-		Object.assign(getJobRow(), {
-			state: "processing",
-			source,
-			attemptId: "owned",
-			attemptCount: 5,
-			remoteJobId: "worker",
-		});
-		expect(
-			await deferForDailyProcessingBudget({
-				videoId,
-				generation: String(getJobRow().generation),
-				attemptId: "owned",
-				now,
-			}),
-		).toBe(false);
-		expect(getJobRow()).toMatchObject({
-			state: "processing",
-			attemptCount: 5,
-			remoteJobId: "worker",
-		});
-	});
+	it.each(["owned", "expired"])(
+		"does not overwrite %s work with a capacity wait",
+		async (condition) => {
+			const attempt = await createAttempt();
+			Object.assign(getJobRow(), {
+				state: "processing",
+				source,
+				...(condition === "owned"
+					? { remoteJobId: "worker" }
+					: { leaseExpiresAt: now }),
+			});
+			expect(
+				await waitForDesktopRecordingCapacity({
+					...attempt,
+					now,
+					retryAfterMs: 30_000,
+				}),
+			).toBe(false);
+		},
+	);
 
 	it.each([null, source])(
 		"does not recreate a recording while deletion is pending",
@@ -892,5 +891,48 @@ describe("retained-source retry policy", () => {
 		expect(await attachRemoteJob({ ...fence, remoteJobId: "remote" })).toBe(
 			false,
 		);
+	});
+});
+
+describe("recovery admission", () => {
+	it("prioritizes interrupted new recordings over an older missing-source backlog", async () => {
+		await createAttempt();
+		const current = {
+			...getJobRow(),
+			state: "committing",
+			source: null,
+			leaseExpiresAt: new Date(now.getTime() - 1),
+			nextRetryAt: now,
+		};
+		rows.jobs = Array.from({ length: 30 }, (_, index) => ({
+			...current,
+			videoId: `old-${index}`,
+			state: "source-blocked",
+			errorCode: "source-missing",
+			nextRetryAt: new Date(now.getTime() - 24 * 60 * 60_000),
+		}));
+		rows.jobs.push(current);
+		const selected = await listRecoverableSegmentJobs({ now, limit: 3 });
+		expect(selected[0]?.videoId).toBe(videoId);
+		expect(selected).toHaveLength(3);
+	});
+
+	it("excludes exhausted and intentionally retired jobs before applying the recovery limit", async () => {
+		await createAttempt();
+		const current = {
+			...getJobRow(),
+			state: "retry",
+			source: null,
+			leaseExpiresAt: null,
+			nextRetryAt: now,
+		};
+		rows.jobs = [
+			"processing-retry-exhausted",
+			"output-replaced",
+			"video-deleting",
+		].map((errorCode) => ({ ...current, videoId: errorCode, errorCode }));
+		rows.jobs.push(current);
+		const selected = await listRecoverableSegmentJobs({ now, limit: 1 });
+		expect(selected.map((job) => job.videoId)).toEqual([videoId]);
 	});
 });
